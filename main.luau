@@ -1,337 +1,336 @@
 -- main ecs table
-local ECS_System = {}
-ECS_System.__index = ECS_System
+local ECS_System = {} -- table for ecs
+ECS_System.__index = ECS_System -- metatable link
 
 -- just copies a table (not deep)
-local function createShallowCopy(copiedTable)
-	local output = {}
-	for key, value in pairs(copiedTable) do
-		output[key] = value
+local function createShallowCopy(copiedTable) -- make shallow copy
+	local output = {} -- new table
+	for key, value in pairs(copiedTable) do -- loop pairs
+		output[key] = value -- copy item
 	end
-	return output
+	return output -- return copy
 end
 
 -- removes one item from an array style table
-local function table_removeValue(tab, value)
-	for i = 1, #tab do
-		if tab[i] == value then
-			table.remove(tab, i)
-			return true
+local function table_removeValue(tab, value) -- remove value
+	for i = 1, #tab do -- loop array
+		if tab[i] == value then -- if match
+			table.remove(tab, i) -- remove it
+			return true -- done
 		end
 	end
-	return false
+	return false -- not found
 end
 
 -- tiny signal system cuz roblox events kinda annoying sometimes
-local function Signal()
-	local listeners = {} ; local signal = {}
+local function Signal() -- make signal
+	local listeners = {} -- store funcs
+	local signal = {} -- signal table
 
-	function signal:connect(func)
-		if type(func) ~= "function" then error("need function bro") end
-		table.insert(listeners, func)
-		local connection = {}
-		function connection:Disconnect()
-			table_removeValue(listeners, func)
+	function signal:connect(func) -- connect func
+		if type(func) ~= "function" then error("need function bro") end -- check func
+		table.insert(listeners, func) -- add func
+		local connection = {} -- conn obj
+		function connection:Disconnect() -- disconnect func
+			table_removeValue(listeners, func) -- remove func
 		end
-		return connection
+		return connection -- give conn
 	end
 
-	function signal:fire(...)
-		for i = 1, #listeners do
-			local ok, err = pcall(listeners[i], ...)
-			if not ok then warn("signal callback cooked itself:", err) end
+	function signal:fire(...) -- fire event
+		for i = 1, #listeners do -- loop listeners
+			local ok, err = pcall(listeners[i], ...) -- call func
+			if not ok then warn("signal callback cooked itself:", err) end -- warn err
 		end
 	end
 
-	function signal:clear()
-		for i = #listeners, 1, -1 do listeners[i] = nil end
+	function signal:clear() -- clear all
+		for i = #listeners, 1, -1 do listeners[i] = nil end -- wipe
 	end
 
-	return signal
+	return signal -- give signal
 end
 
 -- entity id factory so ids dont get stupid high
-local idPool = {}
-do
-	local nextId = 0
-	local recycled = {}
+local idPool = {} -- id pool
 
-	function idPool:next()
-		if #recycled > 0 then
-			return table.remove(recycled)
-		end
-		nextId += 1
-		return nextId
-	end
+-- factory block
+local nextId = 0 -- next id
+local recycled = {} -- recycled ids
 
-	function idPool:release(id)
-		table.insert(recycled, id)
+function idPool:next() -- get id
+	if #recycled > 0 then -- check recycle
+		return table.remove(recycled) -- reuse id
 	end
+	nextId += 1 -- inc id
+	return nextId -- return id
+end
+
+function idPool:release(id) -- release id
+	table.insert(recycled, id) -- add to recycle
 end
 
 -- world = main ecs manager
-local World = {}
-World.__index = World
+local World = {} -- world table
+World.__index = World -- metatable
 
-function World.new(options)
-	options = options or {}
-	local self = setmetatable({
-		_entities = {},              -- all entity ids we got rn
-		_entityComponents = {},      -- what components each entity has
-		_components = {},            -- the actual component data
-		_systems = {},               -- systems we run every update
-		_deferred = {                -- stuff we queue so we dont break loops
-			add = {},
-			remove = {},
-			addComp = {},
-			removeComp = {},
+function World.new(options) -- new world
+	options = options or {} -- default opts
+	local self = setmetatable({ -- world data
+		_entities = {}, -- all entity ids
+		_entityComponents = {}, -- entity components
+		_components = {}, -- component buckets
+		_systems = {}, -- systems list
+		_deferred = { -- deferred ops
+			add = {}, -- add entity
+			remove = {}, -- remove entity
+			addComp = {}, -- add comp
+			removeComp = {}, -- remove comp
 		},
-		_isRunning = false,          -- true while systems are running
-		_queryCache = {},            -- caching cuz searching every frame is pain
-		_tags = {},                  -- tag lookup basically
-		_signals = {
-			entityAdded = Signal(),
-			entityRemoved = Signal(),
+		_isRunning = false, -- running flag
+		_queryCache = {}, -- query cache
+		_tags = {}, -- tag sets
+		_signals = { -- signal set
+			entityAdded = Signal(), -- added signal
+			entityRemoved = Signal(), -- removed signal
 		},
-		_profiler = options.profiler or nil, -- ignore if u dont need it
+		_profiler = options.profiler or nil, -- profiler
 	}, World)
-	return self
+	return self -- give world
 end
 
 -- makes sure the component bucket exists
-local function ensureComponentsTable(self, componentName)
-	if not self._components[componentName] then
-		self._components[componentName] = {}
+local function ensureComponentsTable(self, componentName) -- ensure bucket
+	if not self._components[componentName] then -- check bucket
+		self._components[componentName] = {} -- make bucket
 	end
 end
 
 -- checks if entity matches a query (what components/tags it needs)
-local function matchEntitySignature(self, entityId, signature)
-	local entityComponent = self._entityComponents[entityId] or {}
+local function matchEntitySignature(self, entityId, signature) -- match sig
+	local entityComponent = self._entityComponents[entityId] or {} -- get comps
 
-	if signature.all then
-		for _, component in ipairs(signature.all) do
-			if not entityComponent[component] then return false end
+	if signature.all then -- check all
+		for _, component in ipairs(signature.all) do -- loop all
+			if not entityComponent[component] then return false end -- missing
 		end
 	end
 
-	if signature.any then
-		local found = false
-		for _, component in ipairs(signature.any) do
-			if entityComponent[component] then
-				found = true break
+	if signature.any then -- check any
+		local found = false -- found flag
+		for _, component in ipairs(signature.any) do -- loop any
+			if entityComponent[component] then -- found comp
+				found = true break -- break
 			end
 		end
-		if not found then return false end
+		if not found then return false end -- none found
 	end
 
-	if signature.none then
-		for _, component in ipairs(signature.none) do
-			if entityComponent[component] then return false end
+	if signature.none then -- check none
+		for _, component in ipairs(signature.none) do -- loop none
+			if entityComponent[component] then return false end -- reject
 		end
 	end
 
-	if signature.tags then
-		for _, tag in ipairs(signature.tags) do
-			local tagSet = self._tags[tag]
-			if not tagSet or not tagSet[entityId] then return false end
+	if signature.tags then -- check tags
+		for _, tag in ipairs(signature.tags) do -- loop tags
+			local tagSet = self._tags[tag] -- get tag set
+			if not tagSet or not tagSet[entityId] then return false end -- no tag
 		end
 	end
 
-	return true
+	return true -- match ok
 end
 
 -- update cached queries (so queries stay fast)
-local function updateQueryCache_EntityChange(self, entityId)
-	for _, value in pairs(self._queryCache) do
-		local matches = matchEntitySignature(self, entityId, value.signature)
-		local existed = value.entitiesSet[entityId] ~= nil
-		if matches and not existed then
-			value.entitiesSet[entityId] = true
-			table.insert(value.entitiesList, entityId)
-		elseif not matches and existed then
-			value.entitiesSet[entityId] = nil
-			table_removeValue(value.entitiesList, entityId)
+local function updateQueryCache_EntityChange(self, entityId) -- update cache
+	for _, value in pairs(self._queryCache) do -- loop cache
+		local matches = matchEntitySignature(self, entityId, value.signature) -- check match
+		local existed = value.entitiesSet[entityId] ~= nil -- check exist
+		if matches and not existed then -- new match
+			value.entitiesSet[entityId] = true -- add set
+			table.insert(value.entitiesList, entityId) -- add list
+		elseif not matches and existed then -- no more match
+			value.entitiesSet[entityId] = nil -- remove set
+			table_removeValue(value.entitiesList, entityId) -- remove list
 		end
 	end
 end
 
 -- makes an entity (basically just giving it an id and components)
-function World:createEntity(initComponents, tags)
-	initComponents = initComponents or {}
-	tags = tags or {}
+function World:createEntity(initComponents, tags) -- create entity
+	initComponents = initComponents or {} -- default
+	tags = tags or {} -- default
 
-	local id = idPool:next()
-	self._entities[id] = true
-	self._entityComponents[id] = {}
+	local id = idPool:next() -- get id
+	self._entities[id] = true -- mark alive
+	self._entityComponents[id] = {} -- init comp map
 
-	for name, data in pairs(initComponents) do
-		ensureComponentsTable(self, name)
-		self._components[name][id] = data
-		self._entityComponents[id][name] = true
+	for name, data in pairs(initComponents) do -- add comps
+		ensureComponentsTable(self, name) -- ensure bucket
+		self._components[name][id] = data -- add comp
+		self._entityComponents[id][name] = true -- mark comp
 	end
 
-	for _, tag in ipairs(tags) do
-		self._tags[tag] = self._tags[tag] or {}
-		self._tags[tag][id] = true
+	for _, tag in ipairs(tags) do -- add tags
+		self._tags[tag] = self._tags[tag] or {} -- ensure tag bucket
+		self._tags[tag][id] = true -- set tag
 	end
 
-	updateQueryCache_EntityChange(self, id)
-	self._signals.entityAdded:fire(id)
-	return id
+	updateQueryCache_EntityChange(self, id) -- update cache
+	self._signals.entityAdded:fire(id) -- fire signal
+	return id -- give id
 end
 
 -- deletes entity & wipes components
-function World:destroyEntity(id)
-	if not self._entities[id] then return end
+function World:destroyEntity(id) -- destroy entity
+	if not self._entities[id] then return end -- ignore missing
 
-	if self._isRunning then
-		self._deferred.remove[id] = true return
+	if self._isRunning then -- check running
+		self._deferred.remove[id] = true return -- defer
 	end
 
-	local comps = self._entityComponents[id] or {}
-	for name in pairs(comps) do
-		self._components[name][id] = nil
+	local comps = self._entityComponents[id] or {} -- get comps
+	for name in pairs(comps) do -- loop comps
+		self._components[name][id] = nil -- remove comp
 	end
 
-	self._entityComponents[id] = nil
+	self._entityComponents[id] = nil -- wipe comp map
 
-	for _, tagSet in pairs(self._tags) do
-		tagSet[id] = nil
+	for _, tagSet in pairs(self._tags) do -- loop tags
+		tagSet[id] = nil -- remove tag
 	end
 
-	self._entities[id] = nil
-	idPool:release(id)
-	updateQueryCache_EntityChange(self, id)
-	self._signals.entityRemoved:fire(id)
+	self._entities[id] = nil -- remove entity
+	idPool:release(id) -- recycle id
+	updateQueryCache_EntityChange(self, id) -- update cache
+	self._signals.entityRemoved:fire(id) -- fire signal
 end
 
 -- just checks it exists
-function World:hasEntity(id)
-	return self._entities[id] ~= nil
+function World:hasEntity(id) -- check exist
+	return self._entities[id] ~= nil -- return bool
 end
 
 -- add component to entity
-function World:addComponent(entityId, name, data)
-	if not self._entities[entityId] then error("entity does not exist") end
+function World:addComponent(entityId, name, data) -- add comp
+	if not self._entities[entityId] then error("entity does not exist") end -- check entity
 
-	if self._isRunning then
-		-- queue it so we dont mess up system loops
-		self._deferred.addComp[#self._deferred.addComp + 1] = { entity = entityId, name = name, data = data }
+	if self._isRunning then -- check running
+		self._deferred.addComp[#self._deferred.addComp + 1] = { entity = entityId, name = name, data = data } -- defer
 		return
 	end
 
-	ensureComponentsTable(self, name)
-	self._components[name][entityId] = data
-	self._entityComponents[entityId][name] = true
-	updateQueryCache_EntityChange(self, entityId)
+	ensureComponentsTable(self, name) -- ensure bucket
+	self._components[name][entityId] = data -- add comp
+	self._entityComponents[entityId][name] = true -- mark comp
+	updateQueryCache_EntityChange(self, entityId) -- update cache
 end
 
 -- remove component
-function World:removeComponent(entityId, name)
-	if not self._entities[entityId] then error("entity does not exist") end
+function World:removeComponent(entityId, name) -- remove comp
+	if not self._entities[entityId] then error("entity does not exist") end -- check entity
 
-	if self._isRunning then
-		self._deferred.removeComp[#self._deferred.removeComp + 1] = { entity = entityId, name = name }
+	if self._isRunning then -- running
+		self._deferred.removeComp[#self._deferred.removeComp + 1] = { entity = entityId, name = name } -- defer
 		return
 	end
 
-	if self._components[name] then
-		self._components[name][entityId] = nil
+	if self._components[name] then -- check bucket
+		self._components[name][entityId] = nil -- remove comp
 	end
-	if self._entityComponents[entityId] then
-		self._entityComponents[entityId][name] = nil
+	if self._entityComponents[entityId] then -- check map
+		self._entityComponents[entityId][name] = nil -- unmark
 	end
 
-	updateQueryCache_EntityChange(self, entityId)
+	updateQueryCache_EntityChange(self, entityId) -- update cache
 end
 
 -- grab component
-function World:getComponent(entityId, name)
-	if not self._entities[entityId] then return nil end
-	if not self._components[name] then return nil end
-	return self._components[name][entityId]
+function World:getComponent(entityId, name) -- get comp
+	if not self._entities[entityId] then return nil end -- no entity
+	if not self._components[name] then return nil end -- no comp
+	return self._components[name][entityId] -- give comp
 end
 
 -- replace component (immutable style)
-function World:replaceComponent(entityId, name, data)
-	ensureComponentsTable(self, name)
-	self._components[name][entityId] = data
-	self._entityComponents[entityId][name] = true
-	updateQueryCache_EntityChange(self, entityId)
+function World:replaceComponent(entityId, name, data) -- replace comp
+	ensureComponentsTable(self, name) -- ensure bucket
+	self._components[name][entityId] = data -- set comp
+	self._entityComponents[entityId][name] = true -- mark comp
+	updateQueryCache_EntityChange(self, entityId) -- update cache
 end
 
 -- querying system basically finds entities with matching components
-function World:query(signature)
-	signature = signature or {}
-	local key = ""
-	if signature.all then key ..= "a" end
-	if signature.any then key ..= "b" end
-	if signature.none then key ..= "c" end
-	if signature.tags then key ..= "d" end
+function World:query(signature) -- query
+	signature = signature or {} -- default
+	local key = "" -- key
+	if signature.all then key ..= "a" end -- add key
+	if signature.any then key ..= "b" end -- add key
+	if signature.none then key ..= "c" end -- add key
+	if signature.tags then key ..= "d" end -- add key
 
-	local cached = self._queryCache[key]
-	if cached then return cached.entitiesList end
+	local cached = self._queryCache[key] -- get cache
+	if cached then return cached.entitiesList end -- return cached
 
-	local result = {}
-	local set = {}
-	for id in pairs(self._entities) do
-		if matchEntitySignature(self, id, signature) then
-			set[id] = true
-			table.insert(result, id)
+	local result = {} -- new list
+	local set = {} -- new set
+	for id in pairs(self._entities) do -- loop entities
+		if matchEntitySignature(self, id, signature) then -- if match
+			set[id] = true -- mark
+			table.insert(result, id) -- add
 		end
 	end
 
-	self._queryCache[key] = { signature = createShallowCopy(signature), entitiesList = result, entitiesSet = set }
-	return result
+	self._queryCache[key] = { signature = createShallowCopy(signature), entitiesList = result, entitiesSet = set } -- save cache
+	return result -- return list
 end
 
 -- register a system (runs every update)
-function World:registerSystem(system)
-	system.priority = system.priority or 0
-	system.name = system.name or "system"
-	table.insert(self._systems, system)
-	table.sort(self._systems, function(a,b) return a.priority > b.priority end)
+function World:registerSystem(system) -- add system
+	system.priority = system.priority or 0 -- default prio
+	system.name = system.name or "system" -- default name
+	table.insert(self._systems, system) -- add sys
+	table.sort(self._systems, function(a,b) return a.priority > b.priority end) -- sort
 end
 
 -- runs systems, then applies queued changes
-function World:update(deltaTime)
-	self._isRunning = true
-	for _, system in ipairs(self._systems) do
-		local ok, err = pcall(system.update, system, self, deltaTime)
-		if not ok then warn("system error:", err) end
+function World:update(deltaTime) -- update world
+	self._isRunning = true -- mark running
+	for _, system in ipairs(self._systems) do -- loop systems
+		local ok, err = pcall(system.update, system, self, deltaTime) -- run
+		if not ok then warn("system error:", err) end -- warn
 	end
-	self._isRunning = false
+	self._isRunning = false -- unmark
 
 	-- apply queued component/entity changes now
-	self:_applyDeferred()
+	self:_applyDeferred() -- apply defers
 end
 
-ECS_System.World = World
+ECS_System.World = World -- export world
 
 -- basic system example: movement
-function ECS_System.Systems()
-	local Systems = {}
+function ECS_System.Systems() -- make system list
+	local Systems = {} -- table
 
-	function Systems.Movement()
-		local system = {}
-		system.name = "MovementSystem"
-		system.priority = 100
+	function Systems.Movement() -- movement sys
+		local system = {} -- sys obj
+		system.name = "MovementSystem" -- name
+		system.priority = 100 -- prio
 
-		function system:update(world, deltaTime)
-			-- find things that have both pos + vel
-			local list = world:query({ all = {"Position", "Velocity"} })
-			for _, id in ipairs(list) do
-				local pos = world:getComponent(id, "Position")
-				local vel = world:getComponent(id, "Velocity")
-				world:replaceComponent(id, "Position", pos + vel * deltaTime)
+		function system:update(world, deltaTime) -- update sys
+			local list = world:query({ all = {"Position", "Velocity"} }) -- get ents
+			for _, id in ipairs(list) do -- loop ents
+				local pos = world:getComponent(id, "Position") -- get pos
+				local vel = world:getComponent(id, "Velocity") -- get vel
+				world:replaceComponent(id, "Position", pos + vel * deltaTime) -- move
 			end
 		end
 
-		return system
+		return system -- give sys
 	end
 
-	return Systems
+	return Systems -- give systems
 end
 
-return ECS_System
+return ECS_System -- export
